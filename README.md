@@ -1,2 +1,251 @@
-# Lab_Cap_4
-Laboratorio del Capítulo 4
+# Laboratorio Semana 13: Softmax en CPU, GPU (Jetson Nano) y FPGA (KV260)
+
+EL5859 Computación Heterogénea, II Semestre 2026, Grupo 4. Softmax estable de un vector de N ≤ 1024 elementos en FP16 y FP32.
+Integrantes: Gonzalo Alpízar Salas, Gerson Adrián Cordero Zúñiga, Nicole Irina Corrales Rodríguez, Keilin Loáisiga Téllez
+
+| Carpeta | Contenido |
+|---|---|
+| `CPU/` | `softmax_cpu.cpp`, `cpu_results.csv` (datos crudos de la función), `programa_completo_cpu.csv` (datos crudos del programa completo) |
+| `GPU/` | `softmax_cuda.cu`, `gpu_results.csv` (datos crudos) |
+| `GPU/profiler/` | Salidas de `nvprof` y `nvprof_kernel.csv` (resumen del tiempo de kernel) |
+| `FPGA/` | HLS para la KV260 (a cargo del compañero; ver sección 9) |
+| `resultados/figuras/` | Figuras de tiempo, energía y error |
+
+## 1. Plataforma y condiciones
+
+Las condiciones se fijaron para todas las mediciones de CPU y GPU. Se obtuvieron con `nvpmodel -q`, `jetson_clocks --show` y `tegrastats`.
+
+| Parámetro | Valor |
+|---|---|
+| Placa | NVIDIA Jetson Nano 2GB Developer Kit (acceso remoto por SSH) |
+| Software | JetPack 4.x, Ubuntu 18.04, kernel 4.9.253-tegra, g++ 7.5.0, CUDA 10.2 |
+| Modo de potencia | 5W (ID 1) |
+| Núcleos activos | 2 (cpu0 y cpu1 en línea; cpu2 y cpu3 apagados) |
+| Frecuencia CPU | 921.6 MHz fija |
+| Frecuencia GPU | 614.4 MHz fija |
+| Memoria (EMC) | 1600 MHz |
+| Temperatura | ≈ 26–29 °C (tegrastats) |
+
+
+**Lectura de potencia: alcance.** No hay lectura de potencia de la placa. `tegrastats` no reporta rieles de potencia, el driver `ina3221x` no tiene dispositivos, no hay dispositivos `iio`, `hwmon` solo expone el ventilador y los escaneos I2C no encontraron sensores. Tampoco hay acceso físico para medir con instrumentos. Por indicación del profesor se usó **P = 5 W (modo 5W) como potencia de referencia** y `E = P · t`. **La energía reportada no es una medición**: es el tiempo por 5 W, y por eso ordena las plataformas igual que el tiempo.
+
+## 2. Datos y verificación
+
+- Vector de entrada: `std::mt19937` con semilla 22 y `uniform_real_distribution<double>(-4, 4)`, generado en double. CPU, GPU y FPGA usan el mismo vector.
+- Referencia: softmax en FP64 con `std::exp`, calculada con el vector original en double (antes de convertir), de modo que el error incluye el redondeo de la entrada.
+- En cada ejecución se verifica que la suma sea ≈ 1, que todas las salidas estén en [0, 1] y que el argmax coincida con la referencia. Se reportan error absoluto y relativo máximos contra FP64.
+- Forma estable: `softmax(x) = softmax(x − max(x))`.
+
+## 3. Compilación y comandos
+
+```bash
+# Modo de potencia y relojes
+sudo nvpmodel -q
+sudo env "PATH=$PATH" jetson_clocks
+
+# CPU
+g++ -O3 -std=c++17 -march=native CPU/softmax_cpu.cpp -o softmax_cpu -lm
+./softmax_cpu --precision fp16 --n 100 --reps 10000
+./softmax_cpu --precision fp32 --n 100 --reps 10000
+
+# GPU
+nvcc -O3 -std=c++14 GPU/softmax_cuda.cu -o softmax_cuda
+./softmax_cuda --precision fp16 --n 100 --reps 10000 --measure kernel
+./softmax_cuda --precision fp16 --n 100 --reps 10000 --measure end-to-end
+
+# Perfilador de CUDA (requiere sudo y PATH)
+sudo env "PATH=$PATH" nvprof ./softmax_cuda --precision fp32 --n 1000 --reps 1000 --measure kernel
+```
+
+Cada ejecución agrega 5 filas a `cpu_results.csv` o `gpu_results.csv`. Para los `nvprof` se corrió, para fp16 y fp32 y los N indicados, `--reps 1000` con la salida de `nvprof` redirigida (stderr) a `GPU/profiler/nvprof_<precisión>_n<N>_<modo>.txt`. Los casos de kernel cubren N = 10, 100, 500 y 1000, y los de end-to-end N = 10 y 1000.
+## 4. Protocolo de medición
+
+- **Una función, una medición:** 1 lote de calentamiento descartado y luego **5 lotes de R llamadas** (R = `--reps`); se guarda el promedio por llamada de cada lote.
+- **Repeticiones R:** CPU 2 000 000 / 250 000 / 50 000 / 25 000 (N = 10 / 100 / 500 / 1000); GPU modo kernel 20 000; GPU end-to-end 2 000.
+- **10 procesos independientes** por combinación (precisión × N × medida). Cada proceso aporta 5 filas al CSV. Se reporta la **mediana de las medianas por proceso**, y como dispersión el mínimo y el máximo de esas medianas.
+- **CPU, dos pruebas:** (a) la función, como arriba; (b) el **programa completo**, midiendo el proceso entero con `date +%s%N` por fuera, 10 corridas por configuración, con `--reps 1` (costo fijo) y `--reps 10000`.
+- **GPU, dos tiempos:** (a) kernel y (b) end-to-end (copia H2D, lanzamiento, sincronización y copia D2H) con `steady_clock`. El modo `kernel` usa eventos CUDA, pero ver la limitación de la sección 5.
+
+## 5. Decisiones y limitaciones documentadas
+
+**FP16 en la CPU.** Se usa `__fp16` (GCC ARM) solo como formato de almacenamiento. El Cortex-A57 (ARMv8.0) no tiene aritmética FP16 nativa, y con g++ 7.5.0 `std::exp(__fp16)` devuelve `float` (`sizeof` = 4, verificado en la placa). Por eso el máximo, la exponencial y la suma se calculan en `float` y solo la entrada y la salida se redondean a 16 bits. Es la conversión a FP32 que permite el enunciado, documentada. En la GPU, el kernel usa `__half` para entrada/salida y calcula en `float` de la misma forma.
+
+**La medición "kernel" con `cudaEvent` está limitada por el lanzamiento.** Esa medición dio 33–67 µs por llamada, casi independiente de N y muy variable. Al correr `nvprof` apareció que el kernel dura solo **7.8–11.3 µs**. Un kernel **vacío** lanzado igual (5 lotes de 20 000 lanzamientos) costó **≈ 43 µs por lanzamiento**, de modo que la GPU espera a que la CPU de la Jetson (Cortex-A57 a 921.6 MHz) encole cada kernel. Por eso, para el **tiempo de kernel** se usa `nvprof` (relojes de la GPU), y el modo `cudaEvent` se muestra aparte como medición limitada por lanzamiento. Los valores de `nvprof` son el promedio de 6001 llamadas bajo el perfilador y con la GPU a 614.4 MHz fija; su mín–máx corresponde a llamadas individuales.
+
+
+**Variabilidad.** Las medianas por proceso del modo `cudaEvent` van de ≈ 33 a 67 µs; es la dispersión que se grafica en la serie discontinua.
+
+## 6. Resultados
+
+Potencia = 5 W (referencia). `E (µJ) = 5 · t (µs)` y `J/elem = E · 1e-6 / N`. "GPU kernel" es el tiempo de `nvprof`; "GPU e2e" es el end-to-end. El error máximo es el absoluto contra FP64. Las filas de KV260 las completa el compañero de HLS.
+
+### FP32
+
+| Plataforma | N | Tiempo (µs) | Potencia (W) | Energía (µJ) | J/elem | Error máx. |
+|---|---|---|---|---|---|---|
+| CPU | 10 | 0.388 | 5 | 1.94 | 1.94e-7 | 8.36e-9 |
+| CPU | 100 | 4.072 | 5 | 20.4 | 2.04e-7 | 8.89e-9 |
+| CPU | 500 | 20.674 | 5 | 103.4 | 2.07e-7 | 4.61e-9 |
+| CPU | 1000 | 41.258 | 5 | 206.3 | 2.06e-7 | 5.97e-9 |
+| GPU kernel | 10 | 7.811 | 5 | 39.1 | 3.91e-6 | 2.33e-8 |
+| GPU kernel | 100 | 7.861 | 5 | 39.3 | 3.93e-7 | 9.57e-9 |
+| GPU kernel | 500 | 9.023 | 5 | 45.1 | 9.02e-8 | 2.19e-9 |
+| GPU kernel | 1000 | 11.133 | 5 | 55.7 | 5.57e-8 | 1.50e-9 |
+| GPU e2e | 10 | 149.7 | 5 | 748.5 | 7.49e-5 | 2.33e-8 |
+| GPU e2e | 100 | 154.2 | 5 | 771.0 | 7.71e-6 | 9.57e-9 |
+| GPU e2e | 500 | 169.1 | 5 | 845.5 | 1.69e-6 | 2.19e-9 |
+| GPU e2e | 1000 | 185.6 | 5 | 928.0 | 9.28e-7 | 1.50e-9 |
+| KV260 | 10 / 100 / 500 / 1000 | pendiente (HLS) | | | | |
+
+### FP16
+
+| Plataforma | N | Tiempo (µs) | Potencia (W) | Energía (µJ) | J/elem | Error máx. |
+|---|---|---|---|---|---|---|
+| CPU | 10 | 0.469 | 5 | 2.35 | 2.35e-7 | 8.28e-5 |
+| CPU | 100 | 4.607 | 5 | 23.0 | 2.30e-7 | 5.92e-5 |
+| CPU | 500 | 22.956 | 5 | 114.8 | 2.30e-7 | 1.60e-5 |
+| CPU | 1000 | 46.223 | 5 | 231.1 | 2.31e-7 | 8.05e-6 |
+| GPU kernel | 10 | 7.877 | 5 | 39.4 | 3.94e-6 | 8.28e-5 |
+| GPU kernel | 100 | 7.891 | 5 | 39.5 | 3.95e-7 | 5.92e-5 |
+| GPU kernel | 500 | 9.133 | 5 | 45.7 | 9.13e-8 | 1.60e-5 |
+| GPU kernel | 1000 | 11.253 | 5 | 56.3 | 5.63e-8 | 8.05e-6 |
+| GPU e2e | 10 | 155.4 | 5 | 777.0 | 7.77e-5 | 8.28e-5 |
+| GPU e2e | 100 | 152.6 | 5 | 763.0 | 7.63e-6 | 5.92e-5 |
+| GPU e2e | 500 | 155.9 | 5 | 779.5 | 1.56e-6 | 1.60e-5 |
+| GPU e2e | 1000 | 190.4 | 5 | 952.0 | 9.52e-7 | 8.05e-6 |
+| KV260 | 10 / 100 / 500 / 1000 | pendiente (HLS) | | | | |
+
+Las tablas muestran la mediana de las medianas de 10 procesos; los rangos mín–máx están en las barras de error de las figuras.
+
+### Medición del kernel con `cudaEvent` (limitada por lanzamiento, mediana en µs)
+
+| Precisión | N = 10 | N = 100 | N = 500 | N = 1000 |
+|---|---|---|---|---|
+| FP16 | 58.6 | 39.0 | 63.9 | 61.9 |
+| FP32 | 49.8 | 62.4 | 64.4 | 63.9 |
+
+### CPU: programa completo (mediana de 10 corridas, µs)
+
+| Precisión | N | `--reps 1` | `--reps 10000` |
+|---|---|---|---|
+| FP16 | 10 | 9209 | 37 763 |
+| FP16 | 100 | 9400 | 286 479 |
+| FP16 | 500 | 9880 | 1 390 031 |
+| FP16 | 1000 | 10 502 | 2 774 636 |
+| FP32 | 10 | 9326 | 32 943 |
+| FP32 | 100 | 9433 | 254 341 |
+| FP32 | 500 | 9752 | 1 249 991 |
+| FP32 | 1000 | 10 376 | 2 489 939 |
+
+`--reps 1` aísla el costo fijo del proceso (arranque, generación de datos, referencia FP64 y verificación). Es una cota superior porque incluye el arranque de `date`, que se usó para medir por fuera. Para `--reps 10000` el total es consistente con `60 000 × t_función + costo fijo` (por ejemplo FP32 N = 1000: 2.486 s previstos contra 2.490 s medidos).
+
+### Figuras
+
+Puntos = mediana de las medianas por proceso; barras = mínimo y máximo de esas medianas (para `nvprof`, mínimo y máximo de llamadas individuales). El error es el mismo en todas las corridas (semilla fija), así que no hay barras de error en las figuras de error.
+
+![Tiempo por llamada](resultados/figuras/fig1_tiempo.png)
+![Energía por llamada](resultados/figuras/fig2_energia_llamada.png)
+![Energía por elemento](resultados/figuras/fig3_energia_elemento.png)
+![Error absoluto](resultados/figuras/fig4_error.png)
+![Error relativo](resultados/figuras/fig5_error_relativo.png)
+
+## 7. Salidas del perfilador
+
+`GPU/profiler/` contiene, por precisión (fp16, fp32): `nvprof` en modo kernel para N = 10, 100, 500 y 1000, y en modo end-to-end para N = 10 y 1000, más `nvprof_kernel.csv` con el tiempo de kernel (promedio, mínimo y máximo por llamada) de los 8 casos.
+
+| Precisión | N | Kernel promedio (µs) | Mín (µs) | Máx (µs) |
+|---|---|---|---|---|
+| FP16 | 10 | 7.877 | 7.813 | 10.314 |
+| FP16 | 100 | 7.891 | 7.865 | 10.366 |
+| FP16 | 500 | 9.133 | 9.063 | 11.564 |
+| FP16 | 1000 | 11.253 | 11.198 | 13.857 |
+| FP32 | 10 | 7.811 | 7.761 | 10.366 |
+| FP32 | 100 | 7.861 | 7.813 | 10.367 |
+| FP32 | 500 | 9.023 | 8.959 | 11.928 |
+| FP32 | 1000 | 11.133 | 11.042 | 13.752 |
+
+Desglose del end-to-end en FP32 (de `nvprof_fp32_n10_end-to-end.txt` y `nvprof_fp32_n1000_end-to-end.txt`), por iteración y sin contar `cudaMalloc`/`cudaFree` (arranque y cierre):
+
+| Concepto | N = 10 | N = 1000 |
+|---|---|---|
+| `cudaMemcpy` (2 por iteración) | 64.5 % (184 µs) | 67.7 % (218 µs) |
+| `cudaLaunchKernel` | 30.4 % (87 µs) | 27.8 % (90 µs) |
+| `cudaDeviceSynchronize` | 4.6 % (13 µs) | 4.2 % (13.5 µs) |
+| `cudaGetLastError` | 0.5 % | 0.4 % |
+| Actividad en la GPU (kernel + 2 copias) | 8.8 µs | 13.4 µs |
+
+Bajo el perfilador cada iteración cuesta ≈ 285 µs (N = 10) y ≈ 323 µs (N = 1000), contra 149.7 y 185.6 µs sin él; por eso solo son confiables las proporciones.
+
+## 8. Preguntas
+
+### 1. ¿Qué etapa domina el tiempo en cada plataforma y cómo cambia con N?
+
+**CPU (función).** El tiempo es lineal en N, ≈ 41 ns/elemento en FP32 y ≈ 46 ns/elemento en FP16 de N = 10 a N = 1000, sin costo fijo apreciable. Dentro de la función, la etapa más probable es la exponencial (`expf` por elemento), pero no se realizó una medición por separado. FP16 cuesta entre 12 % y 21 % más por las conversiones FP16 ↔ FP32.
+
+**CPU (programa completo).** Con `--reps 10000` domina la función, cada vez más con N: ≈ 71 % (N = 10), 96 % (100), 99 % (500) y 99 % (1000). Para una sola ejecución domina el costo fijo del proceso.
+
+**GPU.** La actividad real en la GPU (kernel más las dos copias) es de 8.8 µs a N = 10 y 13.4 µs a N = 1000, es decir ≈ 6–7 % del end-to-end (149.7 y 185.6 µs en FP32). El resto es sobrecosto en la CPU y el controlador. Según `nvprof` (porcentajes del tiempo de API por iteración, sin contar la inicialización y el cierre): ≈ 65–68 % `cudaMemcpy` (2 por iteración), ≈ 28–30 % `cudaLaunchKernel` y ≈ 4–5 % `cudaDeviceSynchronize`. Las copias duran ≈ 0.3–1.2 µs en la GPU pero ≈ 92–109 µs como llamada de API, de modo que dominan los costos fijos de cada llamada y no el ancho de banda. Bajo el perfilador el end-to-end sube a ≈ 285–323 µs, así que los tiempos absolutos de API están inflados ≈ 1.7–1.9× y solo son confiables las proporciones. Dentro del kernel, el tiempo sube de 7.8 a 11.1 µs entre N = 10 y N = 1000, lo que apunta a un piso fijo (dos reducciones en árbol de 8 niveles con sus barreras) que domina a N pequeño; tampoco se midió por etapa.
+
+**KV260.** Pendiente (HLS).
+
+### 2. ¿Qué diferencia de error aparece entre FP16 y FP32? ¿Se debe al formato, a la exponencial o a la reducción?
+
+| N | Error abs. FP16 | Error rel. FP16 | Error rel. FP32 (CPU / GPU) |
+|---|---|---|---|
+| 10 | 8.3e-5 | 8.43e-4 | 2.66e-7 / 2.66e-7 |
+| 100 | 5.9e-5 | 1.94e-3 | 3.82e-7 / 3.81e-7 |
+| 500 | 1.6e-5 | 5.63e-3 | 5.61e-7 / 4.36e-7 |
+| 1000 | 8.1e-6 | 1.16e-2 | 1.13e-6 / 4.59e-7 |
+
+El error absoluto de FP32 queda en 1e-9–2e-8, entre 3 y 4 órdenes de magnitud por debajo del de FP16.
+
+**Se debe principalmente al formato.**
+- FP16 en CPU y GPU da **el mismo error** (las curvas se superponen en la figura 5), aunque usan `expf` distintos y distinto orden de suma (secuencial contra árbol). Si la exponencial o la reducción importaran, diferirían.
+- **Redondeo de la entrada.** Para |x| entre 2 y 4, el paso de FP16 es 2⁻⁹ y el error máximo de redondeo es ≈ 1e-3, que se traslada casi tal cual al error relativo de la salida. Coincide con el 8.43e-4 de N = 10.
+- **Crecimiento del error relativo con N.** Con N = 1000, la salida mínima ronda 2.7e-6 (estimación), por debajo del mínimo normal de FP16 (6.1e-5). En esa zona subnormal el paso es 6e-8 y el error relativo máximo estimado (≈ 1.1e-2) coincide con el 1.16e-2 medido. El error absoluto baja con N porque las salidas son ≈ 1/N.
+
+**Matiz.** En esta implementación FP16 es solo almacenamiento y el cálculo va en float, de modo que "formato" significa redondear la entrada y la salida a 16 bits. Con aritmética `half` real (por ejemplo en HLS), la exponencial y la suma también añadirían error.
+
+**La reducción solo se nota en FP32.** El error es idéntico a N = 10 (2.66e-7) y casi igual a N = 100; la diferencia aparece desde N = 500 y a N = 1000 la CPU (suma secuencial) da 1.13e-6 y la GPU (árbol) 4.59e-7. Es consistente con que la suma en árbol acumula menos error, pero no se aisló de la diferencia entre los dos `expf`, así que es una hipótesis.
+
+### 3. ¿Por qué la GPU puede ser peor que la CPU para vectores pequeños?
+
+A N = 10 en FP32, la CPU tarda 0.39 µs, el kernel de la GPU 7.8 µs y el end-to-end 149.7 µs. Los costos de la GPU son fijos y no se amortizan con 10 elementos:
+- **Lanzamiento:** ≈ 43 µs por lanzamiento de un kernel vacío, más que todo el cómputo.
+- **Transferencias y sincronización:** copiar 40 bytes en cada sentido y sincronizar pesa mucho más que el trabajo (cada `cudaMemcpy` cuesta ≈ 92 µs como llamada bajo `nvprof`, aunque la copia en la GPU dura menos de 1 µs).
+- **Piso del kernel:** ≈ 7.8 µs por las dos reducciones con sus barreras, aunque solo 10 de 256 hilos tengan datos.
+- **La CPU no paga nada de eso:** los datos están en caché y no hay transferencia.
+
+El cruce depende de qué se compare:
+- **Kernel puro:** cruza entre N = 100 (CPU 4.1 µs, GPU 7.9 µs) y N = 500 (CPU 20.7 µs, GPU 9.0 µs), alrededor de N ≈ 200.
+- **End-to-end:** la GPU nunca gana hasta N = 1000 (186 µs contra 41 µs).
+
+La energía sigue el mismo orden porque es 5 W × t con potencia de referencia constante.
+
+### 4. ¿Qué diferencia hay entre latencia HLS y tiempo total observado desde el host?
+
+Pendiente (HLS, a cargo del compañero).
+
+### 5. ¿Qué optimización HLS mejoró más la latencia y cuánto aumentó el uso de recursos?
+
+Pendiente (HLS, a cargo del compañero).
+
+### 6. ¿Cuál plataforma minimiza tiempo y cuál energía por elemento? ¿Cambia la respuesta entre FP16 y FP32?
+
+Pendiente: requiere los datos de la KV260. Con lo medido en la Jetson: la CPU es la más rápida para N ≲ 200 y siempre en end-to-end; el kernel de la GPU es el más rápido para N grandes (11.1 µs contra 41.3 µs a N = 1000 en FP32) y también el de menor energía por elemento (5.6e-8 J contra 2.1e-7 J), aunque la energía es 5 W × t. FP16 no mejora a la CPU (es 12–21 % más lenta, 2.3e-7 J/elem contra 2.0e-7 J/elem) y en la GPU no cambia (7.88 contra 7.81 µs), porque el cálculo es en float.
+
+## 9. FPGA (KV260)
+
+Pendiente: proyecto de Vitis HLS en `FPGA/`, con síntesis C y cosimulación para N = 10, 100, 500 y 1000, tablas de latencia, II, frecuencia, LUT, FF, BRAM, URAM y DSP por variante, y tiempo total observado desde el host. La optimización HLS pedida en el enunciado corresponde a esta parte.
+
+## 10. Declaración de uso de IA
+Nota sobre utilización de herramientas de IA
+
+Se hace uso de herramientas de IA como apoyo para comprender conceptos, generar ideas y mejorar la redacción de la documentación. La implementación, la validación y los resultados son responsabilidad del estudiante, quien asume la responsabilidad por el uso indebido o no descrito anteriormente.
+
+Se adjuntan los enlaces compartidos de las conversaciones como evidencia:
+
+Softmax para CPU y GPU:
+
+https://claude.ai/share/ae6dd46e-06fe-40a8-9ad8-9a4f1c0b0b64
+
