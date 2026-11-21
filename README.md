@@ -1,6 +1,7 @@
 # Laboratorio Semana 13: Softmax en CPU, GPU (Jetson Nano) y FPGA (KV260)
 
-EL5859 Computación Heterogénea, Grupo 4. Softmax estable de un vector de N ≤ 1024 elementos en FP16 y FP32.
+EL5859 Computación Heterogénea, II Semestre 2026, Grupo 4. Softmax estable de un vector de N ≤ 1024 elementos en FP16 y FP32.
+Integrantes: Gonzalo Alpízar Salas, Gerson Adrián Cordero Zúñiga, Nicole Irina Corrales Rodríguez, Keilin Loáisiga Téllez
 
 | Carpeta | Contenido |
 |---|---|
@@ -236,3 +237,15 @@ Pendiente: requiere los datos de la KV260. Con lo medido en la Jetson: la CPU es
 ## 9. FPGA (KV260)
 
 Pendiente: proyecto de Vitis HLS en `FPGA/`, con síntesis C y cosimulación para N = 10, 100, 500 y 1000, tablas de latencia, II, frecuencia, LUT, FF, BRAM, URAM y DSP por variante, y tiempo total observado desde el host. La optimización HLS pedida en el enunciado corresponde a esta parte.
+
+## 13. Declaración de uso de IA
+Nota sobre utilización de herramientas de IA
+
+Se hace uso de herramientas de IA como apoyo para comprender conceptos, generar ideas y mejorar la redacción de la documentación. La implementación, la validación y los resultados son responsabilidad del estudiante, quien asume la responsabilidad por el uso indebido o no descrito anteriormente.
+
+Se adjuntan los enlaces compartidos de las conversaciones como evidencia:
+
+Softmax para CPU y GPU:
+
+https://claude.ai/share/ae6dd46e-06fe-40a8-9ad8-9a4f1c0b0b64
+
