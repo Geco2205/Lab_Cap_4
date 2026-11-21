@@ -258,7 +258,7 @@ Se desarrolló una implementación de **Softmax estable** mediante Vitis HLS par
 El kernel conserva el nombre **`softmax_hls`** y la interfaz `softmax_hls(x, y, n)`, con puertos `m_axi` para los vectores de entrada/salida y control `s_axilite` para los argumentos y el inicio del acelerador. Se implementó la forma estable:
 
 $$
-\operatorname{softmax}(x_i)=\frac{\exp(x_i-m)}{\sum_{j=0}^{n-1}\exp(x_j-m)},\qquad m=\max_j(x_j).
+\mathrm{softmax}(x_i)=\frac{\exp(x_i-m)}{\sum_{j=0}^{n-1}\exp(x_j-m)},\qquad m=\max_j(x_j).
 $$
 
 La operación se organizó en tres fases: **(1)** búsqueda del máximo, **(2)** cálculo de exponenciales y acumulación de la suma, y **(3)** normalización. Restar el máximo antes de aplicar la exponencial reduce el riesgo de desbordamiento numérico.
