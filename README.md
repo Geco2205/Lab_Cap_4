@@ -238,7 +238,7 @@ Pendiente: requiere los datos de la KV260. Con lo medido en la Jetson: la CPU es
 
 Pendiente: proyecto de Vitis HLS en `FPGA/`, con síntesis C y cosimulación para N = 10, 100, 500 y 1000, tablas de latencia, II, frecuencia, LUT, FF, BRAM, URAM y DSP por variante, y tiempo total observado desde el host. La optimización HLS pedida en el enunciado corresponde a esta parte.
 
-## 13. Declaración de uso de IA
+## 10. Declaración de uso de IA
 Nota sobre utilización de herramientas de IA
 
 Se hace uso de herramientas de IA como apoyo para comprender conceptos, generar ideas y mejorar la redacción de la documentación. La implementación, la validación y los resultados son responsabilidad del estudiante, quien asume la responsabilidad por el uso indebido o no descrito anteriormente.
