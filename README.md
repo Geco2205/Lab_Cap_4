@@ -385,5 +385,8 @@ Softmax para CPU y GPU:
 
 https://claude.ai/share/ae6dd46e-06fe-40a8-9ad8-9a4f1c0b0b64
 
+Softmax para FPGA (errores en la ejecución)
+
+https://chatgpt.com/g/g-p-6a178c0edc108191988b3e2671ba15fa-gonzalota/c/6b013704-b33c-83e8-b481-9aa9f86cc6fa
 
 ---
