@@ -1,6 +1,7 @@
-# Laboratorio Semana 13: Softmax en CPU, GPU (Jetson Nano) y FPGA (KV260)
+# Laboratorio Capítulo 4: Softmax en CPU, GPU (Jetson Nano) y FPGA (KV260)
 
 EL5859 Computación Heterogénea, II Semestre 2026, Grupo 4. Softmax estable de un vector de N ≤ 1024 elementos en FP16 y FP32.
+
 Integrantes: Gonzalo Alpízar Salas, Gerson Adrián Cordero Zúñiga, Nicole Irina Corrales Rodríguez, Keilin Loáisiga Téllez
 
 | Carpeta | Contenido |
@@ -8,7 +9,7 @@ Integrantes: Gonzalo Alpízar Salas, Gerson Adrián Cordero Zúñiga, Nicole Iri
 | `CPU/` | `softmax_cpu.cpp`, `cpu_results.csv` (datos crudos de la función), `programa_completo_cpu.csv` (datos crudos del programa completo) |
 | `GPU/` | `softmax_cuda.cu`, `gpu_results.csv` (datos crudos) |
 | `GPU/profiler/` | Salidas de `nvprof` y `nvprof_kernel.csv` (resumen del tiempo de kernel) |
-| `FPGA/` | HLS para la KV260 (a cargo del compañero; ver sección 9) |
+| `FPGA/` | HLS para la KV260 (ver sección 9) |
 | `resultados/figuras/` | Figuras de tiempo, energía y error |
 
 ## 1. Plataforma y condiciones
@@ -75,9 +76,9 @@ Cada ejecución agrega 5 filas a `cpu_results.csv` o `gpu_results.csv`. Para los
 
 **Variabilidad.** Las medianas por proceso del modo `cudaEvent` van de ≈ 33 a 67 µs; es la dispersión que se grafica en la serie discontinua.
 
-## 6. Resultados
+## 6. Resultados CPU y GPU
 
-Potencia = 5 W (referencia). `E (µJ) = 5 · t (µs)` y `J/elem = E · 1e-6 / N`. "GPU kernel" es el tiempo de `nvprof`; "GPU e2e" es el end-to-end. El error máximo es el absoluto contra FP64. Las filas de KV260 las completa el compañero de HLS.
+Potencia = 5 W (referencia). `E (µJ) = 5 · t (µs)` y `J/elem = E · 1e-6 / N`. "GPU kernel" es el tiempo de `nvprof`; "GPU e2e" es el end-to-end. El error máximo es el absoluto contra FP64.
 
 ### FP32
 
@@ -95,7 +96,6 @@ Potencia = 5 W (referencia). `E (µJ) = 5 · t (µs)` y `J/elem = E · 1e-6 / N`
 | GPU e2e | 100 | 154.2 | 5 | 771.0 | 7.71e-6 | 9.57e-9 |
 | GPU e2e | 500 | 169.1 | 5 | 845.5 | 1.69e-6 | 2.19e-9 |
 | GPU e2e | 1000 | 185.6 | 5 | 928.0 | 9.28e-7 | 1.50e-9 |
-| KV260 | 10 / 100 / 500 / 1000 | pendiente (HLS) | | | | |
 
 ### FP16
 
@@ -113,7 +113,6 @@ Potencia = 5 W (referencia). `E (µJ) = 5 · t (µs)` y `J/elem = E · 1e-6 / N`
 | GPU e2e | 100 | 152.6 | 5 | 763.0 | 7.63e-6 | 5.92e-5 |
 | GPU e2e | 500 | 155.9 | 5 | 779.5 | 1.56e-6 | 1.60e-5 |
 | GPU e2e | 1000 | 190.4 | 5 | 952.0 | 9.52e-7 | 8.05e-6 |
-| KV260 | 10 / 100 / 500 / 1000 | pendiente (HLS) | | | | |
 
 Las tablas muestran la mediana de las medianas de 10 procesos; los rangos mín–máx están en las barras de error de las figuras.
 
@@ -186,7 +185,7 @@ Bajo el perfilador cada iteración cuesta ≈ 285 µs (N = 10) y ≈ 323 µs (N 
 
 **GPU.** La actividad real en la GPU (kernel más las dos copias) es de 8.8 µs a N = 10 y 13.4 µs a N = 1000, es decir ≈ 6–7 % del end-to-end (149.7 y 185.6 µs en FP32). El resto es sobrecosto en la CPU y el controlador. Según `nvprof` (porcentajes del tiempo de API por iteración, sin contar la inicialización y el cierre): ≈ 65–68 % `cudaMemcpy` (2 por iteración), ≈ 28–30 % `cudaLaunchKernel` y ≈ 4–5 % `cudaDeviceSynchronize`. Las copias duran ≈ 0.3–1.2 µs en la GPU pero ≈ 92–109 µs como llamada de API, de modo que dominan los costos fijos de cada llamada y no el ancho de banda. Bajo el perfilador el end-to-end sube a ≈ 285–323 µs, así que los tiempos absolutos de API están inflados ≈ 1.7–1.9× y solo son confiables las proporciones. Dentro del kernel, el tiempo sube de 7.8 a 11.1 µs entre N = 10 y N = 1000, lo que apunta a un piso fijo (dos reducciones en árbol de 8 niveles con sus barreras) que domina a N pequeño; tampoco se midió por etapa.
 
-**KV260.** Pendiente (HLS).
+**KV260.** Se responde en sección 9.6.
 
 ### 2. ¿Qué diferencia de error aparece entre FP16 y FP32? ¿Se debe al formato, a la exponencial o a la reducción?
 
@@ -206,7 +205,7 @@ El error absoluto de FP32 queda en 1e-9–2e-8, entre 3 y 4 órdenes de magnitud
 
 **Matiz.** En esta implementación FP16 es solo almacenamiento y el cálculo va en float, de modo que "formato" significa redondear la entrada y la salida a 16 bits. Con aritmética `half` real (por ejemplo en HLS), la exponencial y la suma también añadirían error.
 
-**La reducción solo se nota en FP32.** El error es idéntico a N = 10 (2.66e-7) y casi igual a N = 100; la diferencia aparece desde N = 500 y a N = 1000 la CPU (suma secuencial) da 1.13e-6 y la GPU (árbol) 4.59e-7. Es consistente con que la suma en árbol acumula menos error, pero no se aisló de la diferencia entre los dos `expf`, así que es una hipótesis.
+**La reducción solo se nota en FP32.** El error es idéntico a N = 10 (2.66e-7) y casi igual a N = 100; la diferencia aparece desde N = 500 y a N = 1000 la CPU (suma secuencial) da 1.13e-6 y la GPU (árbol) 4.59e-7.
 
 ### 3. ¿Por qué la GPU puede ser peor que la CPU para vectores pequeños?
 
@@ -224,19 +223,19 @@ La energía sigue el mismo orden porque es 5 W × t con potencia de referencia c
 
 ### 4. ¿Qué diferencia hay entre latencia HLS y tiempo total observado desde el host?
 
-Pendiente (HLS, a cargo del compañero).
+Se responde en sección 9.6.
 
 ### 5. ¿Qué optimización HLS mejoró más la latencia y cuánto aumentó el uso de recursos?
 
-Pendiente (HLS, a cargo del compañero).
+Se responde en sección 9.6.
 
 ### 6. ¿Cuál plataforma minimiza tiempo y cuál energía por elemento? ¿Cambia la respuesta entre FP16 y FP32?
 
-Pendiente: requiere los datos de la KV260. Con lo medido en la Jetson: la CPU es la más rápida para N ≲ 200 y siempre en end-to-end; el kernel de la GPU es el más rápido para N grandes (11.1 µs contra 41.3 µs a N = 1000 en FP32) y también el de menor energía por elemento (5.6e-8 J contra 2.1e-7 J), aunque la energía es 5 W × t. FP16 no mejora a la CPU (es 12–21 % más lenta, 2.3e-7 J/elem contra 2.0e-7 J/elem) y en la GPU no cambia (7.88 contra 7.81 µs), porque el cálculo es en float.
+Se responde en sección 9.6.
 
-## 10. Inciso C: implementación HLS para FPGA KV260
+## 9. Inciso C: implementación HLS para FPGA KV260
 
-### 10.1. Objetivo, entorno y alcance alcanzado
+### 9.1. Objetivo, entorno y alcance alcanzado
 
 Se desarrolló una implementación de **Softmax estable** mediante Vitis HLS para una **AMD/Xilinx Kria KV260 (K26)**, con precisiones de entrada/salida **FP32 y FP16** y cuatro variantes de arquitectura. El objetivo fue evaluar el efecto de las directivas de optimización HLS, comprobar la corrección funcional y, posteriormente, desplegar el acelerador para compararlo con las ejecuciones de CPU y GPU.
 
@@ -253,7 +252,7 @@ Se desarrolló una implementación de **Softmax estable** mediante Vitis HLS par
 
 **Límite de tamaño:** aunque el planteamiento general del laboratorio contempla `N ≤ 1024`, la interfaz HLS implementada utiliza arreglos de capacidad **1000** y valida `1 ≤ n ≤ 1000`. Por tanto, la evidencia funcional de FPGA corresponde a los cuatro tamaños indicados; **no se validó `N=1024` en esta implementación**.
 
-### 10.2. Implementación y variantes desarrolladas
+### 9.2. Implementación y variantes desarrolladas
 
 El kernel conserva el nombre **`softmax_hls`** y la interfaz `softmax_hls(x, y, n)`, con puertos `m_axi` para los vectores de entrada/salida y control `s_axilite` para los argumentos y el inicio del acelerador. Se implementó la forma estable:
 
@@ -276,7 +275,7 @@ Se implementaron las siguientes variantes, manteniendo los nombres originales de
 
 Las configuraciones de ambas precisiones están en `hls_fp32.cfg`, `hls_fp16.cfg` y sus equivalentes en `FPGA/optimizations/`. El banco de pruebas es `FPGA/tb_softmax_hls.cpp`.
 
-### 10.3. Validación funcional: CSim y cosimulación RTL
+### 9.3. Validación funcional: CSim y cosimulación RTL
 
 Las ocho combinaciones (**4 variantes × 2 precisiones**) se comprobaron con **CSim**, síntesis HLS y **cosimulación RTL**, utilizando `N = 10, 100, 500 y 1000`. Las ejecuciones registradas finalizaron satisfactoriamente.
 
@@ -291,7 +290,7 @@ Para la referencia del testbench disponible, las tolerancias son `2e-5` de error
 
 **Interpretación:** superar CSim y CoSim respalda la funcionalidad del kernel en el entorno de desarrollo y su equivalencia a nivel RTL para los casos ensayados.
 
-### 10.4. Resultados comparativos de latencia HLS
+### 9.4. Resultados comparativos de latencia HLS
 
 La siguiente tabla resume los **ciclos de latencia informados por la síntesis HLS para `N = 1000`**. La aceleración se calcula respecto de BASELINE de la misma precisión: `speedup = ciclos_BASELINE / ciclos_variante`. La reducción porcentual es `100 × (1 − ciclos_variante/ciclos_BASELINE)`.
 
@@ -317,7 +316,7 @@ El objetivo de reloj de `10 ns` permitiría convertir los ciclos en **tiempos no
 
 **II, frecuencia y recursos:** las directivas `PIPELINE` buscan reducir el intervalo de iniciación (*Initiation Interval*, II) de determinados bucles, pero no debe confundirse el II local con la latencia total del kernel. No se dispone en esta actualización de un cuadro verificado con los valores finales de **II logrado, LUT, FF, BRAM, URAM y DSP** de cada variante.
 
-### 10.5. Intento de integración y causas del bloqueo del despliegue
+### 9.5. Intento de integración y causas del bloqueo del despliegue
 
 Una vez completadas la síntesis y la cosimulación, se investigó el flujo mostrado en clase por el profesor para ejecutar aceleradores en la Kria: **compilar el kernel con `v++ -c` para producir un `.xo`, enlazarlo con `v++ -l` y la plataforma KV260, generar los archivos de programación y ejecutar un programa host con XRT**.
 
@@ -334,7 +333,7 @@ La computadora de desarrollo dispone de aproximadamente **8 GiB de RAM y 24 GiB 
 
 **Alcance del bloqueo:** no se produjeron para nuestro diseño los archivos finales **`.xclbin`, `.bit.bin`, `.dtbo` y `shell.json`** requeridos por el procedimiento de despliegue. Por ello, no fue posible instalar el acelerador en `/lib/firmware/xilinx`, cargarlo con `xmutil`, ni realizar una ejecución medida desde el host. La imposibilidad de completar estas etapas no invalida las simulaciones y los informes de síntesis ya obtenidos.
 
-### 10.6. Respuestas complementarias a las preguntas de la sección 8
+### 9.6. Respuestas complementarias a las preguntas de la sección 8
 
 **Pregunta 1. ¿Qué etapa domina el tiempo en la KV260 y cómo cambia con N?**
 
@@ -355,7 +354,7 @@ Para `N=1000`, **PIPELINE** proporcionó la mejora significativa: de **13 726 a 
 
 Con los datos físicos existentes, **solo pueden compararse CPU y GPU de la Jetson Nano**, tal como se hizo en la sección 8. La KV260 no dispone de tiempos reales, potencia durante la ejecución de Softmax ni energía por elemento medidos. Un valor de latencia HLS en ciclos **no permite deducir directamente el consumo energético ni establecer si la FPGA supera a CPU/GPU**. Tampoco corresponde asignar a la KV260 la referencia de 5 W utilizada para los resultados de la Jetson.
 
-### 10.7. Estado final, mejoras viables y conclusiones
+### 9.7. Estado final, mejoras viables y conclusiones
 
 | Requisito / evidencia para FPGA | Estado al cierre del laboratorio |
 |---|---|
