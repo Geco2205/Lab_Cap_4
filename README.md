@@ -234,11 +234,147 @@ Pendiente (HLS, a cargo del compañero).
 
 Pendiente: requiere los datos de la KV260. Con lo medido en la Jetson: la CPU es la más rápida para N ≲ 200 y siempre en end-to-end; el kernel de la GPU es el más rápido para N grandes (11.1 µs contra 41.3 µs a N = 1000 en FP32) y también el de menor energía por elemento (5.6e-8 J contra 2.1e-7 J), aunque la energía es 5 W × t. FP16 no mejora a la CPU (es 12–21 % más lenta, 2.3e-7 J/elem contra 2.0e-7 J/elem) y en la GPU no cambia (7.88 contra 7.81 µs), porque el cálculo es en float.
 
-## 9. FPGA (KV260)
+## 10. Inciso C: implementación HLS para FPGA KV260
 
-Pendiente: proyecto de Vitis HLS en `FPGA/`, con síntesis C y cosimulación para N = 10, 100, 500 y 1000, tablas de latencia, II, frecuencia, LUT, FF, BRAM, URAM y DSP por variante, y tiempo total observado desde el host. La optimización HLS pedida en el enunciado corresponde a esta parte.
+### 10.1. Objetivo, entorno y alcance alcanzado
 
-## 10. Declaración de uso de IA
+Se desarrolló una implementación de **Softmax estable** mediante Vitis HLS para una **AMD/Xilinx Kria KV260 (K26)**, con precisiones de entrada/salida **FP32 y FP16** y cuatro variantes de arquitectura. El objetivo fue evaluar el efecto de las directivas de optimización HLS, comprobar la corrección funcional y, posteriormente, desplegar el acelerador para compararlo con las ejecuciones de CPU y GPU.
+
+| Elemento | Configuración o estado |
+|---|---|
+| Computadora de desarrollo | Ubuntu 24.04.5 LTS; Vitis HLS / Vitis / Vivado 2025.1 |
+| Dispositivo objetivo HLS | `xck26-sfvc784-2lv-c` (Kria KV260) |
+| Período objetivo configurado en HLS | `clock=10ns` (100 MHz nominales; **no** es una frecuencia física medida) |
+| Plataforma de integración proporcionada para el laboratorio | `kv260_custom.xpfm`, creada con herramientas Vivado/Vitis 2023.2 |
+| Entorno de la placa accesible por SSH | Linux en KV260, con XRT 2.13.0 y herramienta `xmutil` |
+| Tamaños validados en HLS | `N = 10, 100, 500, 1000` |
+| Etapas completadas | Implementación, C simulation (**CSim**), síntesis HLS y cosimulación RTL (**CoSim**) para las ocho combinaciones |
+| Etapas pendientes | Enlace definitivo con la plataforma, generación del paquete ejecutable y mediciones del acelerador en la KV260 |
+
+**Límite de tamaño:** aunque el planteamiento general del laboratorio contempla `N ≤ 1024`, la interfaz HLS implementada utiliza arreglos de capacidad **1000** y valida `1 ≤ n ≤ 1000`. Por tanto, la evidencia funcional de FPGA corresponde a los cuatro tamaños indicados; **no se validó `N=1024` en esta implementación**.
+
+### 10.2. Implementación y variantes desarrolladas
+
+El kernel conserva el nombre **`softmax_hls`** y la interfaz `softmax_hls(x, y, n)`, con puertos `m_axi` para los vectores de entrada/salida y control `s_axilite` para los argumentos y el inicio del acelerador. Se implementó la forma estable:
+
+$$
+\operatorname{softmax}(x_i)=\frac{\exp(x_i-m)}{\sum_{j=0}^{n-1}\exp(x_j-m)},\qquad m=\max_j(x_j).
+$$
+
+La operación se organizó en tres fases: **(1)** búsqueda del máximo, **(2)** cálculo de exponenciales y acumulación de la suma, y **(3)** normalización. Restar el máximo antes de aplicar la exponencial reduce el riesgo de desbordamiento numérico.
+
+En **FP16**, `half` se utiliza para la representación de los datos de entrada y salida; los acumuladores y las operaciones internas del código HLS están implementados en `float`. Por ello se trata de **FP16 con cómputo interno mixto FP32**, no de una implementación con todas las operaciones efectuadas en aritmética de 16 bits. La precisión se selecciona mediante `SOFTMAX_FP16` en la configuración HLS; en FP32 se emplea `float`.
+
+Se implementaron las siguientes variantes, manteniendo los nombres originales del repositorio:
+
+| Variante | Archivo fuente | Estrategia |
+|---|---|---|
+| **BASELINE (V0)** | `FPGA/softmax_hls.cpp` | Implementación secuencial de referencia, sin directivas de optimización de bucles. |
+| **PIPELINE (V1)** | `FPGA/optimizations/pipeline/softmax_hls_pipeline.cpp` | Canalización de bucles para aumentar el solapamiento de operaciones. |
+| **ARRAY_PARTITION (V2)** | `FPGA/optimizations/array_partition/softmax_hls_partition.cpp` | Canalización y particionamiento de un arreglo interno para explorar el paralelismo de acceso. |
+| **DATAFLOW (V3)** | `FPGA/optimizations/dataflow/softmax_hls_dataflow.cpp` | Organización por etapas con directivas de flujo de datos, además de optimizaciones de canalización. |
+
+Las configuraciones de ambas precisiones están en `hls_fp32.cfg`, `hls_fp16.cfg` y sus equivalentes en `FPGA/optimizations/`. El banco de pruebas es `FPGA/tb_softmax_hls.cpp`.
+
+### 10.3. Validación funcional: CSim y cosimulación RTL
+
+Las ocho combinaciones (**4 variantes × 2 precisiones**) se comprobaron con **CSim**, síntesis HLS y **cosimulación RTL**, utilizando `N = 10, 100, 500 y 1000`. Las ejecuciones registradas finalizaron satisfactoriamente.
+
+La validación utiliza un vector reproducible (`std::mt19937`, semilla `22`, valores uniformes entre `-4` y `4`), una referencia Softmax en `double` (**FP64**) y las comprobaciones siguientes:
+
+- Valores de salida finitos, dentro del intervalo `[0, 1]`.
+- Suma de las probabilidades aproximadamente igual a `1`.
+- Coincidencia del índice de la salida máxima (`argmax`) con la referencia.
+- Error absoluto máximo respecto de FP64 dentro de la tolerancia del testbench.
+
+Para la referencia del testbench disponible, las tolerancias son `2e-5` de error absoluto y `1e-4` en la suma para FP32; `1e-3` de error absoluto y `1e-2` en la suma para FP16. Estas tolerancias son **criterios de aceptación**, no valores de error medidos.
+
+**Interpretación:** superar CSim y CoSim respalda la funcionalidad del kernel en el entorno de desarrollo y su equivalencia a nivel RTL para los casos ensayados.
+
+### 10.4. Resultados comparativos de latencia HLS
+
+La siguiente tabla resume los **ciclos de latencia informados por la síntesis HLS para `N = 1000`**. La aceleración se calcula respecto de BASELINE de la misma precisión: `speedup = ciclos_BASELINE / ciclos_variante`. La reducción porcentual es `100 × (1 − ciclos_variante/ciclos_BASELINE)`.
+
+| Precisión | Variante | Latencia HLS (ciclos) | Reducción de ciclos vs. BASELINE | Aceleración relativa |
+|---|---|---:|---:|---:|
+| FP32 | BASELINE (V0) | 13 726 | 0,00 % | 1,000× |
+| FP32 | PIPELINE (V1) | 9 315 | 32,14 % | 1,474× |
+| FP32 | ARRAY_PARTITION (V2) | 9 315 | 32,14 % | 1,474× |
+| FP32 | DATAFLOW (V3) | 9 309 | 32,18 % | 1,474× |
+| FP16 | BASELINE (V0) | 15 337 | 0,00 % | 1,000× |
+| FP16 | PIPELINE (V1) | 10 147 | 33,84 % | 1,511× |
+| FP16 | ARRAY_PARTITION (V2) | 10 147 | 33,84 % | 1,511× |
+| FP16 | DATAFLOW (V3) | 10 139 | 33,89 % | 1,513× |
+
+**Análisis:**
+
+- La mayor mejora práctica respecto del punto de partida provino de **PIPELINE**, con una reducción aproximada de **32 % en FP32** y **34 % en FP16**.
+- **ARRAY_PARTITION** no redujo adicionalmente la latencia en ciclos frente a PIPELINE para este caso. Particionar memoria puede mejorar accesos paralelos, pero no elimina necesariamente la dependencia de la reducción ni los costos de las operaciones matemáticas.
+- **DATAFLOW** presentó el menor número absoluto de ciclos, aunque su ventaja respecto de PIPELINE fue de **solo 6 ciclos en FP32 y 8 ciclos en FP16**. Por ello, no se justifica atribuirle una mejora sustancial de rendimiento con estos resultados.
+- FP16 **no resultó más rápido** en ciclos HLS que FP32 en estas implementaciones. Esto es coherente con el uso de operaciones internas en `float` y con la estructura de dependencias del algoritmo.
+
+El objetivo de reloj de `10 ns` permitiría convertir los ciclos en **tiempos nominales de síntesis** (por ejemplo, `9315 × 10 ns = 93,15 µs` para FP32 PIPELINE).
+
+**II, frecuencia y recursos:** las directivas `PIPELINE` buscan reducir el intervalo de iniciación (*Initiation Interval*, II) de determinados bucles, pero no debe confundirse el II local con la latencia total del kernel. No se dispone en esta actualización de un cuadro verificado con los valores finales de **II logrado, LUT, FF, BRAM, URAM y DSP** de cada variante.
+
+### 10.5. Intento de integración y causas del bloqueo del despliegue
+
+Una vez completadas la síntesis y la cosimulación, se investigó el flujo mostrado en clase por el profesor para ejecutar aceleradores en la Kria: **compilar el kernel con `v++ -c` para producir un `.xo`, enlazarlo con `v++ -l` y la plataforma KV260, generar los archivos de programación y ejecutar un programa host con XRT**.
+
+Se realizaron las siguientes comprobaciones, de forma separada del trabajo HLS ya versionado:
+
+1. Se verificó que la plataforma proporcionada (`kv260_custom.xpfm`) está asociada a **2023.2**, mientras que la computadora utilizada dispone de **Vitis/Vivado 2025.1**. La propia herramienta emitió: `CRITICAL WARNING: [v++ 60-1299] ... platform ... (version 2023.2) is a PRE_SYNTH platform and is not supported by the current tool version (2025.1)`.
+2. Con el ejemplo de integración **`suma_vec` proporcionado por el profesor**, `v++ -c` generó el objeto `.xo`, pero `v++ -l` falló durante `system_link`. Inicialmente apareció un conflicto de bibliotecas C++ por la versión `GLIBCXX_3.4.30` y, posteriormente, la falta de la utilidad `xsltproc`; ambos obstáculos pudieron identificarse y sortearse durante el diagnóstico.
+3. El siguiente error impidió continuar el enlace: `failed to load external entity "/opt/Xilinx/2025.1/Vitis/scripts/xsd/k2f.xsl"`, seguido de `Unable to create function map for HLS kernel`. Se comprobó que **`k2f.xsl` y su directorio esperado no existen** en la instalación disponible. No se modificó artificialmente ese componente interno.
+4. De manera experimental, también se consiguió generar con `v++ -c` un **`softmax_hls.xo` de FP32 PIPELINE** (aproximadamente 24 MB) en un directorio de integración local. Esto confirma que el código Softmax pudo superar la compilación de kernel, **pero no que el enlace final ni el despliegue funcionen**.
+
+Estos resultados **no demuestran un error en la función Softmax**: el enlace falló también con el ejemplo del profesor. La combinación de una plataforma **2023.2 no soportada oficialmente por Vitis 2025.1** y los **componentes faltantes de la instalación local** impidió completar el flujo en el entorno disponible. No se puede establecer, con las pruebas efectuadas, cuál habría sido el resultado del enlace una vez corregidos todos los problemas del entorno.
+
+La computadora de desarrollo dispone de aproximadamente **8 GiB de RAM y 24 GiB libres en disco** al momento de la revisión; estas restricciones desaconsejaron instalar y ejecutar en paralelo otra versión completa de Vitis/Vivado para repetir la implementación física. En la placa KV260 se verificó el acceso remoto y la disponibilidad de XRT, pero **no se cargó ni ejecutó un nuevo bitstream Softmax**.
+
+**Alcance del bloqueo:** no se produjeron para nuestro diseño los archivos finales **`.xclbin`, `.bit.bin`, `.dtbo` y `shell.json`** requeridos por el procedimiento de despliegue. Por ello, no fue posible instalar el acelerador en `/lib/firmware/xilinx`, cargarlo con `xmutil`, ni realizar una ejecución medida desde el host. La imposibilidad de completar estas etapas no invalida las simulaciones y los informes de síntesis ya obtenidos.
+
+### 10.6. Respuestas complementarias a las preguntas de la sección 8
+
+**Pregunta 1. ¿Qué etapa domina el tiempo en la KV260 y cómo cambia con N?**
+
+El algoritmo HLS contiene búsqueda del máximo, cálculo de exponenciales/acumulación y normalización. La reducción acumulativa y el cálculo de exponenciales introducen dependencias y costos potencialmente significativos, pero **no se obtuvo un perfil temporal por etapa sobre la KV260**. Por tanto, no es posible afirmar experimentalmente cuál domina ni cómo varía el tiempo físico con `N`. Los resultados de HLS presentados para `N=1000` describen ciclos estimados, no un perfil de ejecución en placa.
+
+**Pregunta 2. ¿Cómo se comporta el error FP16 frente al FP32 en FPGA?**
+
+El testbench de ambas precisiones pasó las comprobaciones funcionales frente a FP64 en los tamaños ensayados. El uso de `half` en la entrada y salida de FP16 incorpora redondeo adicional respecto de FP32; además, ambas implementaciones utilizan operaciones internas `float`. **No se reporta una comparación cuantitativa del error FPGA FP16/FP32**, ya que los valores máximos por caso no quedaron consolidados.
+
+**Pregunta 4. ¿Qué diferencia hay entre latencia HLS y tiempo total observado desde el host?**
+
+La **latencia HLS** es una estimación de ciclos de la arquitectura sintetizada bajo sus restricciones de reloj. El **tiempo observado desde el host** comprende, además, los costos de preparación y transferencia de buffers entre CPU y FPGA, configuración/inicio del kernel, sincronización y recuperación de resultados mediante XRT. No son magnitudes directamente intercambiables. **No se midió tiempo end-to-end en la KV260**, de modo que no es posible cuantificar la diferencia para nuestro diseño.
+
+**Pregunta 5. ¿Qué optimización mejoró más la latencia y cuánto aumentó el uso de recursos?**
+
+Para `N=1000`, **PIPELINE** proporcionó la mejora significativa: de **13 726 a 9 315 ciclos en FP32** (−32,14 %) y de **15 337 a 10 147 ciclos en FP16** (−33,84 %). DATAFLOW redujo respectivamente otros **6 y 8 ciclos**, una ventaja marginal. ARRAY_PARTITION no modificó los ciclos respecto de PIPELINE en este caso.
+**Pregunta 6. ¿Cuál plataforma minimiza tiempo y energía por elemento, y cómo influye FP16/FP32?**
+
+Con los datos físicos existentes, **solo pueden compararse CPU y GPU de la Jetson Nano**, tal como se hizo en la sección 8. La KV260 no dispone de tiempos reales, potencia durante la ejecución de Softmax ni energía por elemento medidos. Un valor de latencia HLS en ciclos **no permite deducir directamente el consumo energético ni establecer si la FPGA supera a CPU/GPU**. Tampoco corresponde asignar a la KV260 la referencia de 5 W utilizada para los resultados de la Jetson.
+
+### 10.7. Estado final, mejoras viables y conclusiones
+
+| Requisito / evidencia para FPGA | Estado al cierre del laboratorio |
+|---|---|
+| Softmax estable con FP32 y FP16 | **Completado**; entrada/salida FP16 con cómputo interno mixto FP32. |
+| BASELINE, PIPELINE, ARRAY_PARTITION y DATAFLOW | **Completado**; código y configuraciones disponibles en `FPGA/`. |
+| CSim y cosimulación RTL para N = 10, 100, 500, 1000 | **Completadas** en las ocho combinaciones. |
+| Latencia comparativa de HLS | **Completada para N=1000** mediante resultados en ciclos; ver sección 11.4. |
+| Tabla cuantitativa consolidada de II/frecuencia final/LUT/FF/BRAM/URAM/DSP | **Pendiente de consolidar** con valores verificables de los reportes. |
+| Archivo `.xo` de prueba para FP32 PIPELINE | **Generado en integración local experimental**; no desplegado. |
+| `.xclbin`, `.bit.bin`, `.dtbo`, `shell.json` del Softmax | **No generados**; enlace bloqueado. |
+| Ejecución física y tiempo del host en la KV260 | **No realizados**; no hubo acelerador programado. |
+| Potencia y energía por elemento de la KV260 | **No medidas**; no se reportan estimaciones. |
+| Comparación experimental completa CPU/GPU/FPGA | **Parcial**: CPU y GPU medidos; FPGA solo validada y estimada mediante HLS. |
+
+Para completar la parte física sería necesario disponer de un **entorno de compilación íntegro y compatible con la plataforma** —por ejemplo, herramientas que correspondan a la versión de dicha plataforma, o una plataforma reconstruida para la versión utilizada—, generar el paquete ejecutable, desplegarlo de forma autorizada en la KV260 y medir con XRT tiempo de kernel, tiempo total y consumo. Es un trabajo adicional de integración y medición, **no una repetición obligatoria del algoritmo y las validaciones HLS**.
+
+**Conclusión:** el inciso C permitió desarrollar y verificar funcionalmente un Softmax HLS para la arquitectura objetivo, comparar cuatro estrategias de optimización y comprobar que **PIPELINE disminuyó considerablemente la latencia estimada**. La evaluación experimental de rendimiento y energía en la FPGA quedó **inconclusa por limitaciones de compatibilidad e integridad del entorno de compilación**, documentadas mediante mensajes de error reproducibles. Esta distinción evita presentar estimaciones HLS como resultados físicos y deja identificados los pasos necesarios para completar el despliegue.
+
+## 11. Declaración de uso de IA
 Nota sobre utilización de herramientas de IA
 
 Se hace uso de herramientas de IA como apoyo para comprender conceptos, generar ideas y mejorar la redacción de la documentación. La implementación, la validación y los resultados son responsabilidad del estudiante, quien asume la responsabilidad por el uso indebido o no descrito anteriormente.
@@ -249,3 +385,5 @@ Softmax para CPU y GPU:
 
 https://claude.ai/share/ae6dd46e-06fe-40a8-9ad8-9a4f1c0b0b64
 
+
+---
